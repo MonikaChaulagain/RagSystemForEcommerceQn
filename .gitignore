@@ -1,0 +1,82 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# Environment Variables
+.env
+
+# =========================
+# VS Code
+# =========================
+.vscode/
+
+# =========================
+# OS Files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Python Build
+# =========================
+build/
+dist/
+*.egg-info/
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# AI Model Cache
+# =========================
+.cache/
+huggingface/
+
+# =========================
+# Vector Database
+# =========================
+data/chroma_db/
+
+# Uncomment if you later use these
+# data/qdrant/
+# data/faiss/
+
+# =========================
+# Processed Files
+# =========================
+data/processed/
+
+# If you want to keep processed data in Git,
+# comment out the line above and ignore only:
+# data/processed/extracted_output.md
+# data/processed/chunks.json
+
+# =========================
+# Temporary Files
+# =========================
+*.tmp
+*.bak
+
+# Chroma database (generated)
+data/chroma_db/
+
+# Processed/generated files
+data/processed/
+
+# Ignore PDFs if they are large or not yours to redistribute
+data/raw/*.pdf
