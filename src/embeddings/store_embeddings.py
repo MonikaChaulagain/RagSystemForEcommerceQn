@@ -36,7 +36,7 @@ def store_in_chromadb(
     supports dense + sparse-style retrieval quality) and save them into a
     persistent local Chroma vector database.
     """
-    print("🧠 Loading local embedding model ('BAAI/bge-m3')...")
+    print(" Loading local embedding model ('BAAI/bge-m3')...")
     # BGE-M3 runs locally on CPU/GPU without needing an API key.
     # normalize_embeddings=True is important for BGE models — they're
     # trained/evaluated with cosine similarity on normalized vectors.
@@ -46,7 +46,7 @@ def store_in_chromadb(
         encode_kwargs={"normalize_embeddings": True},
     )
 
-    print(f"⚡ Embedding {len(documents)} chunks and saving to '{persist_dir}'...")
+    print(f" Embedding {len(documents)} chunks and saving to '{persist_dir}'...")
     # Initialize and persist Chroma vector store
     vector_db = Chroma.from_documents(
         documents=documents,
@@ -55,7 +55,7 @@ def store_in_chromadb(
         persist_directory=persist_dir,
     )
     print(
-        f"✅ Successfully stored embeddings in ChromaDB collection '{collection_name}'!"
+        f"Successfully stored embeddings in ChromaDB collection '{collection_name}'!"
     )
     return vector_db
 
@@ -65,9 +65,9 @@ def main():
     chunks_path = os.path.join("data", "processed", "chunks.json")
     chroma_db_dir = os.path.join("data", "chroma_db")
 
-    print("📄 Loading chunks from JSON file...")
+    print(" Loading chunks from JSON file...")
     documents = load_chunks_from_json(chunks_path)
-    print(f"📦 Successfully loaded {len(documents)} documents.")
+    print(f" Successfully loaded {len(documents)} documents.")
 
     # Ingest chunks into ChromaDB
     store_in_chromadb(

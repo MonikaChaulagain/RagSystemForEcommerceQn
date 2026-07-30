@@ -1,4 +1,5 @@
 # src/retrieval/rerank_and_answer.py
+import argparse
 import os
 from pathlib import Path
 
@@ -53,7 +54,7 @@ def retrieve_and_rerank(vector_db, query: str, initial_k: int = 10, top_n: int =
 
 
 def build_grounded_fallback_answer(query: str, context_blocks: list[str]) -> str:
-    """Create a concise answer from retrieved context when Gemini is unavailable."""
+    """Create a concise answer from retrieved context when Groq is unavailable."""
     query_lower = query.lower()
 
     if "enterprise" in query_lower or "best suited" in query_lower:
@@ -94,56 +95,99 @@ def generate_answer(query: str, reranked_chunks):
         context_blocks.append(f"[Section: {section}]\n{doc.page_content}")
     context = "\n\n---\n\n".join(context_blocks)
 
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         return (
-            "No GEMINI_API_KEY found in the environment. "
+            "No GROQ_API_KEY found in the environment. "
             f"Fallback answer:\n{build_grounded_fallback_answer(query, context_blocks)}"
         )
 
     try:
-        from langchain_google_genai import ChatGoogleGenerativeAI
+        from langchain_groq import ChatGroq
     except Exception as exc:
         return (
-            f"Gemini support is not installed: {exc}\n\n"
+            f"Groq support is not installed: {exc}\n\n"
             f"Fallback answer:\n{build_grounded_fallback_answer(query, context_blocks)}"
         )
 
-    prompt = f"""Answer the question using ONLY the context below. If the context
-doesn't contain the answer, say so — don't make anything up. Cite the section
-name(s) you used.
+    PROMPT = """You are MarketplaceGuide, a specialized retrieval-augmented assistant for the document "Top 11 Multi-Vendor Marketplace Platforms for eCommerce."
 
-Context:
+<domain_context>
+The source document profiles 11 named multi-vendor marketplace platforms and covers platform types, commission/fee structures, vendor management, admin features, payouts, and enterprise suitability.
+</domain_context>
+
+<rules>
+1. Answer using ONLY the information in <retrieved_context> below. No prior knowledge.
+2. If the context lacks enough information, respond exactly: "The provided document does not contain enough information to answer this question."
+3. Never guess or extrapolate.
+4. For comparison questions, synthesize across ALL relevant retrieved sections, not just one.
+5. If sections conflict, state the conflict explicitly.
+6. Preserve exact platform names, numbers, and terms as written.
+7. Do not mention "the context" or the retrieval process.
+8. Be concise; use bullet points or tables for multi-platform comparisons.
+
+## Source Formatting Rule
+Each retrieved block is tagged as [Section: <path>]. List each unique section only once under "Sources:".
+</rules>
+
+<response_format>
+Answer:
+<answer>
+
+Sources:
+- <formatted source 1>
+- <formatted source 2>
+</response_format>
+
+<retrieved_context>
 {context}
+</retrieved_context>
 
-Question: {query}
+<user_question>
+{query}
+</user_question>
 
 Answer:"""
 
     try:
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash",
+        llm = ChatGroq(
+            model="openai/gpt-oss-20b",
             temperature=0,
-            google_api_key=api_key,
+            api_key=api_key,
         )
+        prompt = PROMPT.format(context=context, query=query)
         response = llm.invoke(prompt)
         return response.content
     except Exception as exc:
         return (
-            f"Gemini generation failed: {exc}\n\n"
+            f"Groq generation failed: {exc}\n\n"
             f"Fallback answer:\n{build_grounded_fallback_answer(query, context_blocks)}"
         )
 
+    
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run retrieval and answer generation for one or more queries.")
+    parser.add_argument("queries", nargs="*", help="One or more questions to answer.")
+    return parser.parse_args()
+
 
 def main():
+    args = parse_args()
     db_dir = os.path.join("data", "chroma_db")
     vector_db = load_vector_store(persist_dir=db_dir)
 
-    queries = [
-        "Which multi-vendor marketplace platform is best suited for enterprise level?",
-        "What are the main features and capabilities of marketplace software?",
-        
-    ]
+    queries = args.queries
+    if not queries:
+        print("No query provided. Enter one or more questions.")
+        while True:
+            user_query = input("Enter a query (press Enter to exit): ").strip()
+            if not user_query:
+                break
+            queries.append(user_query)
+
+    if not queries:
+        print("No queries were provided. Exiting.")
+        return
 
     for query in queries:
         print(f"\n Query: '{query}'")
