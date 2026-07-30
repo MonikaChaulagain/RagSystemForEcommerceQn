@@ -28,63 +28,122 @@ def load_vector_store(
         persist_directory=persist_dir,
     )
 
+import json
+from rank_bm25 import BM25Okapi
+from langchain_core.documents import Document
+
+# Global cache for BM25 to avoid reloading/retokenizing on every query
+_bm25_instance = None
+_all_documents = []
+
+
+def get_bm25_retriever(chunks_json_path: str = "data/processed/chunks.json"):
+    """Initialize or load cached BM25 index over processed chunks."""
+    global _bm25_instance, _all_documents
+    if _bm25_instance is not None:
+        return _bm25_instance, _all_documents
+
+    project_root = Path(__file__).resolve().parents[2]
+    full_path = project_root / chunks_json_path
+    if not full_path.exists():
+        return None, []
+
+    try:
+        with open(full_path, "r", encoding="utf-8") as f:
+            chunks_data = json.load(f)
+
+        _all_documents = []
+        tokenized_corpus = []
+
+        for chunk in chunks_data:
+            doc = Document(
+                page_content=chunk["content"],
+                metadata=chunk.get("metadata", {}),
+            )
+            _all_documents.append(doc)
+            # Tokenize body text for BM25
+            tokenized_corpus.append(chunk["content"].lower().split())
+
+        _bm25_instance = BM25Okapi(tokenized_corpus)
+        return _bm25_instance, _all_documents
+    except Exception as e:
+        print(f"[Warning] Failed to initialize BM25 retriever: {e}")
+        return None, []
+
 
 def retrieve_and_rerank(vector_db, query: str, initial_k: int = 10, top_n: int = 3):
     """
-    Stage 1: cast a wide net with vector similarity search.
-    Stage 2: rerank candidates with a cross-encoder for precision.
-    Falls back to vector distance ranking if the reranker is unavailable.
+    Stage 1: Cast a wide net using Hybrid Search (Dense Vector search + BM25 Keyword search).
+    Stage 2: Merge and deduplicate candidate documents.
+    Stage 3: Rerank the unified candidate list with a Cross-Encoder for precision.
     """
-    candidates = vector_db.similarity_search_with_score(query, k=initial_k)
-    if not candidates:
+    # 1. Retrieve semantic matches via Vector Similarity Search
+    vector_candidates_with_score = vector_db.similarity_search_with_score(query, k=initial_k)
+    vector_candidates = [doc for doc, _ in vector_candidates_with_score]
+
+    # 2. Retrieve keyword matches via BM25
+    bm25, all_docs = get_bm25_retriever()
+    bm25_candidates = []
+    if bm25 is not None:
+        query_tokens = query.lower().split()
+        scores = bm25.get_scores(query_tokens)
+        # Sort and take top matches with non-zero scores
+        top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:initial_k]
+        bm25_candidates = [all_docs[i] for i in top_indices if scores[i] > 0]
+
+    # 3. Merge and deduplicate candidates, keeping relative ranking order
+    seen_contents = set()
+    combined_candidates = []
+
+    for doc in vector_candidates + bm25_candidates:
+        # Deduplicate based on exact page content
+        content_hash = doc.page_content.strip()
+        if content_hash not in seen_contents:
+            seen_contents.add(content_hash)
+            combined_candidates.append(doc)
+
+    if not combined_candidates:
         return []
 
+    # 4. Rerank the combined candidates list using Cross-Encoder
     try:
-        from FlagEmbedding import FlagReranker
+        from sentence_transformers import CrossEncoder
 
-        reranker = FlagReranker("BAAI/bge-reranker-v2-m3", use_fp16=True)
-        pairs = [(query, doc.page_content) for doc, _ in candidates]
-        scores = reranker.compute_score(pairs, normalize=True)
-        ranked = sorted(zip([doc for doc, _ in candidates], scores), key=lambda x: x[1], reverse=True)
+        # Use BAAI/bge-reranker-base, which is fast and fits in memory on CPU
+        reranker = CrossEncoder("BAAI/bge-reranker-base")
+        pairs = [(query, doc.page_content) for doc in combined_candidates]
+        scores = reranker.predict(pairs)
+        ranked = sorted(zip(combined_candidates, scores), key=lambda x: x[1], reverse=True)
         return ranked[:top_n]
     except Exception as exc:
-        print(f"⚠️ Reranker unavailable ({exc}). Falling back to vector similarity scores.")
-        ranked = sorted(candidates, key=lambda item: item[1])
-        return [(doc, score) for doc, score in ranked[:top_n]]
+        print(f"[Warning] Reranker unavailable ({exc}). Falling back to similarity ordering.")
+        # Fallback to vector ranking order or BM25 order if reranker fails
+        return [(doc, 1.0) for doc in combined_candidates[:top_n]]
 
 
 def build_grounded_fallback_answer(query: str, context_blocks: list[str]) -> str:
-    """Create a concise answer from retrieved context when Groq is unavailable."""
-    query_lower = query.lower()
+    """Create a synthesized, structured summary from retrieved context when Groq is unavailable."""
+    if not context_blocks:
+        return "No relevant context was retrieved from the database to answer this question."
 
-    if "enterprise" in query_lower or "best suited" in query_lower:
-        for block in context_blocks:
-            if "mid-market to large enterprises" in block.lower() or "enterprise-grade" in block.lower():
-                excerpt = " ".join(
-                    line.strip() for line in block.splitlines()[1:] if line.strip()
-                )[:280]
-                return (
-                    "Based on the retrieved context, VTEX is the clearest enterprise-level fit. "
-                    "The context describes it as suited for mid-market to large enterprises and "
-                    f"as an enterprise-grade platform. {excerpt}"
-                )
+    summary_lines = [
+        "Groq LLM is currently unavailable (fallback active). Here is a synthesized summary from the retrieved document sections:",
+        ""
+    ]
+    for block in context_blocks:
+        lines = block.splitlines()
+        if not lines:
+            continue
+        section_header = lines[0]
+        content_body = "\n".join(lines[1:]).strip()
+        # Clean/truncate preview
+        content_preview = " ".join(content_body.split())
+        if len(content_preview) > 300:
+            content_preview = content_preview[:300] + "..."
+        summary_lines.append(f"- {section_header}: {content_preview}")
+        summary_lines.append("")
 
-    if "feature" in query_lower or "capabilities" in query_lower:
-        features = []
-        for block in context_blocks:
-            if "key components include" in block.lower():
-                text = " ".join(line.strip() for line in block.splitlines()[1:] if line.strip())
-                features.append(text[:220])
-        if features:
-            return "Based on the retrieved context, marketplace software commonly includes: " + " | ".join(features[:2])
-
-    if context_blocks:
-        first_block = context_blocks[0]
-        section = first_block.splitlines()[0] if first_block.splitlines() else "retrieved section"
-        excerpt = " ".join(line.strip() for line in first_block.splitlines()[1:] if line.strip())[:280]
-        return f"Based on the retrieved context from {section}, the most relevant points are: {excerpt}"
-
-    return "No relevant context was retrieved."
+    return "\n".join(summary_lines).strip()
 
 
 def generate_answer(query: str, reranked_chunks):
@@ -110,24 +169,21 @@ def generate_answer(query: str, reranked_chunks):
             f"Fallback answer:\n{build_grounded_fallback_answer(query, context_blocks)}"
         )
 
-    PROMPT = """You are MarketplaceGuide, a specialized retrieval-augmented assistant for the document "Top 11 Multi-Vendor Marketplace Platforms for eCommerce."
+    PROMPT = """You are MarketplaceGuide, an intelligent and helpful retrieval-augmented assistant specializing in "Top 11 Multi-Vendor Marketplace Platforms for eCommerce."
 
 <domain_context>
-The source document profiles 11 named multi-vendor marketplace platforms and covers platform types, commission/fee structures, vendor management, admin features, payouts, and enterprise suitability.
+The source document profiles 11 named multi-vendor marketplace platforms (such as VTEX, Mirakl, Yo!Kart, CS-Cart Multi-Vendor, Sharetribe, Marketplacer, Spryker, Adobe Commerce/Magento, BigCommerce, Arcadier, and WCFM Marketplace) and covers their deployment types, pricing/commission structures, vendor management, and enterprise suitability.
 </domain_context>
 
 <rules>
-1. Answer using ONLY the information in <retrieved_context> below. No prior knowledge.
-2. If the context lacks enough information, respond exactly: "The provided document does not contain enough information to answer this question."
-3. Never guess or extrapolate.
-4. For comparison questions, synthesize across ALL relevant retrieved sections, not just one.
-5. If sections conflict, state the conflict explicitly.
-6. Preserve exact platform names, numbers, and terms as written.
-7. Do not mention "the context" or the retrieval process.
-8. Be concise; use bullet points or tables for multi-platform comparisons.
+1. **Analyze Intent**: Address the core intent of the user's question. If the user asks open-ended, subjective, or comparative questions (like "which platform is best", "what are my options", "recommend a platform"), do NOT refuse. Instead, synthesize a comprehensive overview from the retrieved context, presenting the options along with their specific strengths, trade-offs, or use-cases (e.g., enterprise, startups, self-hosted vs. SaaS).
+2. **Be Informative and Summarize**: Summarize the platforms in the best structured format (using bullet points, comparative summaries, or clear groupings) so the user gets a highly helpful response.
+3. **Stay Grounded**: Answer using only the information available in the <retrieved_context> below. Do not make up facts or bring in external knowledge not mentioned in the context.
+4. **Handle Off-Topic Queries Strict Refusal**: If the user's question is completely off-topic and has nothing to do with eCommerce, marketplace software, vendor management, platforms, or the context provided, respond exactly: "The provided document does not contain enough information to answer this question."
+5. **Format & Tone**: Do not mention "the context", "retrieved sections", or "retrieval process". Answer directly with a professional, expert tone.
 
 ## Source Formatting Rule
-Each retrieved block is tagged as [Section: <path>]. List each unique section only once under "Sources:".
+At the end of your response, list the unique section paths from the context under a "Sources:" heading.
 </rules>
 
 <response_format>
@@ -151,7 +207,7 @@ Answer:"""
 
     try:
         llm = ChatGroq(
-            model="openai/gpt-oss-20b",
+            model="llama-3.3-70b-versatile",
             temperature=0,
             api_key=api_key,
         )

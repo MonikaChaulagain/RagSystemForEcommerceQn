@@ -36,6 +36,15 @@ def store_in_chromadb(
     supports dense + sparse-style retrieval quality) and save them into a
     persistent local Chroma vector database.
     """
+    import shutil
+
+    if os.path.exists(persist_dir):
+        print(f" Clearing existing vector database at '{persist_dir}' to avoid duplicates...")
+        try:
+            shutil.rmtree(persist_dir)
+        except Exception as e:
+            print(f"⚠️ Warning: Could not remove directory {persist_dir} ({e}).")
+
     print(" Loading local embedding model ('BAAI/bge-m3')...")
     # BGE-M3 runs locally on CPU/GPU without needing an API key.
     # normalize_embeddings=True is important for BGE models — they're
