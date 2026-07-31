@@ -71,25 +71,71 @@ def get_bm25_retriever(chunks_json_path: str = "data/processed/chunks.json"):
         return None, []
 
 
+def rewrite_query(query: str) -> list[str]:
+    """Expand a user query into a small set of search-oriented variants.
+
+    This helps with ambiguous or comparative questions such as "best ecommerce platform"
+    by searching for semantically related phrasing without requiring a full LLM rewrite.
+    """
+    cleaned = " ".join((query or "").strip().split())
+    if not cleaned:
+        return []
+
+    variants = [cleaned]
+    lowered = cleaned.lower()
+
+    if any(word in lowered for word in ["best", "top", "compare", "comparison", "recommend", "which", "platform"]):
+        variants.extend([
+            f"{cleaned} ecommerce marketplace platform",
+            f"{cleaned} platform comparison pricing features deployment",
+            f"{cleaned} multi vendor marketplace solution",
+        ])
+    else:
+        variants.extend([
+            f"{cleaned} ecommerce marketplace",
+            f"{cleaned} platform features pricing",
+        ])
+
+    # Keep the original question as the first pass and add domain-specific variants.
+    final_variants = []
+    seen = set()
+    for variant in variants:
+        variant_key = variant.lower().strip()
+        if variant_key and variant_key not in seen:
+            seen.add(variant_key)
+            final_variants.append(variant)
+
+    return final_variants
+
+
 def retrieve_and_rerank(vector_db, query: str, initial_k: int = 10, top_n: int = 3):
     """
-    Stage 1: Cast a wide net using Hybrid Search (Dense Vector search + BM25 Keyword search).
-    Stage 2: Merge and deduplicate candidate documents.
-    Stage 3: Rerank the unified candidate list with a Cross-Encoder for precision.
+    Stage 1: Rewrite the user query into a few search-focused variants.
+    Stage 2: Cast a wide net using Hybrid Search (Dense Vector search + BM25 Keyword search).
+    Stage 3: Merge and deduplicate candidate documents.
+    Stage 4: Rerank the unified candidate list with a Cross-Encoder for precision.
     """
-    # 1. Retrieve semantic matches via Vector Similarity Search
-    vector_candidates_with_score = vector_db.similarity_search_with_score(query, k=initial_k)
-    vector_candidates = [doc for doc, _ in vector_candidates_with_score]
+    rewritten_queries = rewrite_query(query)
+    if not rewritten_queries:
+        return []
 
-    # 2. Retrieve keyword matches via BM25
+    print(f"[Info] Query rewrite variants: {rewritten_queries}")
+
+    # 1. Retrieve semantic matches via Vector Similarity Search across rewritten queries
+    vector_candidates = []
+    for rewritten_query in rewritten_queries:
+        vector_candidates_with_score = vector_db.similarity_search_with_score(rewritten_query, k=initial_k)
+        vector_candidates.extend(doc for doc, _ in vector_candidates_with_score)
+
+    # 2. Retrieve keyword matches via BM25 using the same rewritten set
     bm25, all_docs = get_bm25_retriever()
     bm25_candidates = []
     if bm25 is not None:
-        query_tokens = query.lower().split()
-        scores = bm25.get_scores(query_tokens)
-        # Sort and take top matches with non-zero scores
-        top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:initial_k]
-        bm25_candidates = [all_docs[i] for i in top_indices if scores[i] > 0]
+        for rewritten_query in rewritten_queries:
+            query_tokens = rewritten_query.lower().split()
+            scores = bm25.get_scores(query_tokens)
+            top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:initial_k]
+            bm25_candidates.extend(all_docs[i] for i in top_indices if scores[i] > 0)
 
     # 3. Merge and deduplicate candidates, keeping relative ranking order
     seen_contents = set()
