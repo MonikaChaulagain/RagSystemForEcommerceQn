@@ -105,7 +105,7 @@ def main():
     print(f" Total Chunks Generated: {len(chunks)}")
 
     if chunks:
-        print("\n--- 🔍 Chunk #0 Preview ---")
+        print("\n--- Chunk #0 Preview ---")
         print(f"Metadata: {chunks[0].metadata}")
         print(f"Content:\n{chunks[0].page_content[:300]}...\n")
 
