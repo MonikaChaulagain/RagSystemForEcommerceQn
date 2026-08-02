@@ -11,7 +11,8 @@ sys.path.append(str(PROJECT_ROOT))
 from src.ingestion.extract import main as run_extract
 from src.ingestion.chunking import main as run_chunking
 from src.embeddings.store_embeddings import main as run_store
-from src.retrieval.rerank_and_answer import load_vector_store, retrieve_and_rerank, generate_answer
+from src.retrieval.rerank_and_answer import load_vector_store
+from src.agent.agent import run_agent
 
 
 def ensure_pipeline_runs(rebuild_db: bool = False):
@@ -46,34 +47,35 @@ def ensure_pipeline_runs(rebuild_db: bool = False):
 
 
 def query_pipeline(vector_db, query: str):
-    """Execute the retrieval, reranking, and generation pipeline for a single query."""
+    """Execute the agent-routed retrieval, reranking, and generation pipeline for a single query."""
     print(f"\n[Query] Query: '{query}'")
     print("=" * 70)
-    
-    print("[-] Retrieving and Reranking chunks...")
+
+    print("[-] Running agent (classify -> retrieve -> rerank -> [retry] -> generate)...")
     try:
-        reranked = retrieve_and_rerank(vector_db, query, initial_k=10, top_n=3)
+        result = run_agent(vector_db, query)
     except Exception as e:
-        print(f"[Error] Error during retrieval and reranking: {e}")
+        print(f"[Error] Agent pipeline failed: {e}")
         return
 
-    if not reranked:
-        print("[Warning] No relevant chunks found in the document.")
-        return
+    print(f"[-] Detected intent: {result.intent.value}")
+    if result.used_second_pass:
+        print("[-] First-pass evidence was weak -> ran a second, broadened retrieval pass.")
 
-    print("-" * 70)
-    print("[-] Retrieved Context References (Top 3):")
-    for rank, (doc, score) in enumerate(reranked, start=1):
-        print(f"  Rank {rank} | Rerank Score: {score:.4f}")
-        print(f"    Section: {doc.metadata.get('section_path', 'Unknown Section')}")
-        excerpt = doc.page_content.strip().replace('\n', ' ')
-        print(f"    Content Preview: \"{excerpt[:180]}...\"")
+    if result.reranked_chunks:
         print("-" * 70)
+        print("[-] Retrieved Context References:")
+        for rank, (doc, score) in enumerate(result.reranked_chunks, start=1):
+            print(f"  Rank {rank} | Rerank Score: {score:.4f}")
+            print(f"    Section: {doc.metadata.get('section_path', 'Unknown Section')}")
+            excerpt = doc.page_content.strip().replace("\n", " ")
+            print(f"    Content Preview: \"{excerpt[:180]}...\"")
+            print("-" * 70)
+    else:
+        print("[Warning] No relevant chunks found in the document.")
 
-    print("[-] Querying Groq for synthesized response...")
-    answer = generate_answer(query, reranked)
     print("\n[Synthesized Response]:\n")
-    print(answer)
+    print(result.answer)
     print("=" * 70 + "\n")
 
 
@@ -116,7 +118,7 @@ def main():
         print("Ask any questions about the 11 eCommerce platforms.")
         print("Type 'exit' or 'quit' (or press Enter) to close the shell.")
         print("*" * 60 + "\n")
-        
+
         while True:
             try:
                 user_query = input("Ask a question: ").strip()
